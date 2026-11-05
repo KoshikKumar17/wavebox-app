@@ -1,0 +1,3 @@
+-keep class com.wavebox.app.LameNative { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
