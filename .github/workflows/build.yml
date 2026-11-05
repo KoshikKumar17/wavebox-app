@@ -1,7 +1,10 @@
 name: Build APK
 on:
   push:
+    tags: ["v*"]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,8 +19,26 @@ jobs:
           gradle-version: "8.9"
       - name: Build release APK
         run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -1)
+          IN=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          $APKSIGNER sign --ks "$RUNNER_TEMP/ks.jks" \
+            --ks-pass env:KS_PASS --ks-key-alias "$KEY_ALIAS" \
+            --out Wavebox-${{ github.ref_name }}.apk "$IN"
+          $APKSIGNER verify Wavebox-${{ github.ref_name }}.apk
       - uses: actions/upload-artifact@v4
         with:
           name: Wavebox-apk
-          path: app/build/outputs/apk/release/*.apk
-          
+          path: Wavebox-*.apk
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Wavebox-*.apk
+          generate_release_notes: true
