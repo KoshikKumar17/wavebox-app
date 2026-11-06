@@ -5,6 +5,10 @@
 Search / paste-link player and M4A downloader for JioSaavn songs, albums and playlists,
 using your worker API (`jiosaavnsearch-up.koshikkumar17.workers.dev`).
 
+## Download
+
+Download the latest version from [releases](https://github.com/KoshikKumar17/wavebox-app/releases) tab of this repository.
+
 ## Build on your phone (no PC)
 1. Create a new GitHub repository (private is fine).
 2. Unzip this project and upload ALL files and folders (Add file -> Upload files).
