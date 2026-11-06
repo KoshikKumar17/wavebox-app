@@ -2,6 +2,7 @@ package com.wavebox.app
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.SideEffect
+import androidx.core.content.ContextCompat
 import android.graphics.Color as AColor
 
 class MainActivity : ComponentActivity() {
@@ -20,7 +22,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (Build.VERSION.SDK_INT >= 33) {
+        if (Build.VERSION.SDK_INT >= 33 && !vm.prefs.askedNotif &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            vm.prefs.askedNotif = true
             registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
                 .launch(Manifest.permission.POST_NOTIFICATIONS)
         }

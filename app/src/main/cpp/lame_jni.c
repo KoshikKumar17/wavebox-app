@@ -33,14 +33,12 @@ Java_com_wavebox_app_LameNative_encode(JNIEnv *env, jclass clazz, jlong handle,
     (void) clazz;
     lame_t lame = (lame_t) (intptr_t) handle;
     if (!lame) return -100;
-    jshort *in = (*env)->GetPrimitiveArrayCritical(env, pcm, NULL);
-    if (!in) return -101;
+    /* do all other JNI calls and allocation BEFORE entering the critical section */
     jsize outCap = (*env)->GetArrayLength(env, out);
     unsigned char *tmp = (unsigned char *) malloc((size_t) outCap);
-    if (!tmp) {
-        (*env)->ReleasePrimitiveArrayCritical(env, pcm, in, JNI_ABORT);
-        return -102;
-    }
+    if (!tmp) return -102;
+    jshort *in = (*env)->GetPrimitiveArrayCritical(env, pcm, NULL);
+    if (!in) { free(tmp); return -101; }
     int n;
     if (channels == 1) {
         n = lame_encode_buffer(lame, in, NULL, frames, tmp, outCap);

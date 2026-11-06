@@ -35,4 +35,9 @@ class Prefs(ctx: Context) {
     var dlFormat: String
         get() = sp.getString("dlfmt", "m4a") ?: "m4a"
         set(v) = sp.edit().putString("dlfmt", v).apply()
+
+    /** notification permission is asked only once */
+    var askedNotif: Boolean
+        get() = sp.getBoolean("asked_notif", false)
+        set(v) = sp.edit().putBoolean("asked_notif", v).apply()
 }

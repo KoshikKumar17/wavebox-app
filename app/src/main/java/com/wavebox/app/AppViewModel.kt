@@ -28,7 +28,9 @@ import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -58,7 +60,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val store = Store(ctx)
 
     val messages = MutableSharedFlow<String>(extraBufferCapacity = 8)
-    private fun say(m: String) { messages.tryEmit(m) }
+    internal fun say(m: String) { messages.tryEmit(m) }
 
     // ---------------- navigation ----------------
     var tab by mutableIntStateOf(0)
@@ -435,7 +437,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val c = controller ?: return
         if (c.mediaItemCount == 0) { play(listOf(s), 0); return }
         c.addMediaItem(c.currentMediaItemIndex + 1, item(s))
-        say("Will play next")
+        // with shuffle on, the player puts the new song at a random spot in its shuffled order
+        say(if (c.shuffleModeEnabled) "Added to queue (shuffle is on)" else "Will play next")
     }
 
     fun addToQueue(s: Song) {
@@ -467,25 +470,55 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var errorSkips = 0
+
     private val listener = object : Player.Listener {
-        override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing }
+        override fun onIsPlayingChanged(playing: Boolean) {
+            isPlaying = playing
+            if (playing) errorSkips = 0
+        }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             nowId = mediaItem?.mediaId
-            mediaItem?.mediaId?.let { songMap[it] }?.let { addRecent(it) }
+            // a repeat-one loop is the same song again, not a new "recent"
+            if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                mediaItem?.mediaId?.let { songMap[it] }?.let { addRecent(it) }
+            }
         }
         override fun onTimelineChanged(timeline: Timeline, reason: Int) { refreshQueue() }
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) { shuffleOn = shuffleModeEnabled }
         override fun onRepeatModeChanged(mode: Int) { repeatMode = mode }
         override fun onPlayerError(error: PlaybackException) {
-            say("Couldn't play this song. Check your connection or the file.")
+            val c = controller
+            if (c != null && c.hasNextMediaItem() && errorSkips < 3) {
+                errorSkips++
+                say("Couldn't play this song. Skipping to the next one.")
+                c.seekToNextMediaItem(); c.prepare(); c.play()
+            } else {
+                say("Couldn't play this song. Check your connection or the file.")
+            }
         }
     }
 
     // ---------------- downloads ----------------
-    private val _dl = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val dlProgress: StateFlow<Map<String, Int>> = _dl
-    private val jobs = HashMap<String, Job>()
-    private val gate = Semaphore(2)
+    // Downloads live in an app-wide scope (not the ViewModel) so they keep running when the
+    // screen is closed; DownloadService keeps the process alive while any download is active.
+    private companion object {
+        val dlScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val dlState = MutableStateFlow<Map<String, Int>>(emptyMap())
+        val jobs = HashMap<String, Job>()
+        val gate = Semaphore(2)
+        @Volatile var live: AppViewModel? = null
+
+        fun commitDownloaded(st: Store, rec: Song) {
+            val v = live
+            val cur = v?.downloaded ?: st.loadSongs("downloaded")
+            val merged = listOf(rec) + cur.filter { it.id != rec.id }
+            st.saveSongs("downloaded", merged)
+            v?.downloaded = merged
+        }
+    }
+
+    val dlProgress: StateFlow<Map<String, Int>> = dlState
 
     private fun folderUri(): Uri? = folder?.let { Uri.parse(it) }
 
@@ -493,29 +526,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (s.links.isEmpty()) { say("This song is already on your device"); return }
         if (isDownloaded(s.id)) { say("Already downloaded"); return }
         if (jobs.containsKey(s.id)) return
-        _dl.update { it + (s.id to 0) }
-        val job = viewModelScope.launch {
+        val quality = dlQuality
+        val format = dlFormat
+        val target = folderUri()
+        val withTags = embed
+        val appCtx = ctx
+        val st = store
+        dlState.update { it + (s.id to 0) }
+        val job = dlScope.launch {
             try {
                 gate.withPermit {
-                    val r = Downloader.run(ctx, s, dlQuality, dlFormat, folderUri(), embed) { p ->
-                        _dl.update { m -> m + (s.id to p) }
+                    val r = Downloader.run(appCtx, s, quality, format, target, withTags) { p ->
+                        dlState.update { m -> m + (s.id to p) }
                     }
-                    val rec = s.copy(uri = r.uri, added = System.currentTimeMillis())
-                    downloaded = listOf(rec) + downloaded.filter { it.id != s.id }
-                    store.saveSongs("downloaded", downloaded)
-                    say("Saved: ${r.name}")
+                    commitDownloaded(st, s.copy(uri = r.uri, added = System.currentTimeMillis()))
+                    live?.say("Saved: ${r.name}")
                 }
             } catch (e: CancellationException) {
-                say("Download cancelled")
+                live?.say("Download cancelled")
                 throw e
             } catch (e: Exception) {
-                say(e.message ?: "Download failed")
+                live?.say(e.message ?: "Download failed")
             } finally {
-                _dl.update { it - s.id }
+                dlState.update { it - s.id }
                 jobs.remove(s.id)
+                DownloadService.sync(appCtx, jobs.size)
             }
         }
+        if (job.isCompleted) return
         jobs[s.id] = job
+        DownloadService.sync(appCtx, jobs.size)
     }
 
     fun downloadAll(list: List<Song>) {
@@ -603,8 +643,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return out
     }
 
+    /** Drops "Downloaded" entries whose file was deleted outside the app (only when we can see all audio, so it can't be wrong). */
+    private fun pruneDownloaded() {
+        if (!hasAudioAccess() || downloaded.isEmpty()) return
+        val snapshot = downloaded
+        viewModelScope.launch {
+            val gone = withContext(Dispatchers.IO) {
+                snapshot.filter { sg ->
+                    val u = sg.uri?.let { Uri.parse(it) } ?: return@filter false
+                    if (u.authority != "media") return@filter false
+                    runCatching {
+                        ctx.contentResolver.query(u, arrayOf(MediaStore.Audio.Media._ID), null, null, null)
+                            ?.use { it.count == 0 } ?: false
+                    }.getOrDefault(false)
+                }.map { it.id }.toSet()
+            }
+            if (gone.isNotEmpty()) {
+                downloaded = downloaded.filter { it.id !in gone }
+                store.saveSongs("downloaded", downloaded)
+            }
+        }
+    }
+
     // ---------------- init ----------------
     init {
+        live = this
+        pruneDownloaded()
         val token = SessionToken(ctx, ComponentName(ctx, PlayerService::class.java))
         val future = MediaController.Builder(ctx, token).buildAsync()
         future.addListener({
@@ -624,6 +688,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        if (live === this) live = null
         controller?.release()
         super.onCleared()
     }

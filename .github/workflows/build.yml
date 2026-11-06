@@ -5,9 +5,13 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -36,6 +40,7 @@ jobs:
         with:
           name: Wavebox-apk
           path: Wavebox-*.apk
+          if-no-files-found: error
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
