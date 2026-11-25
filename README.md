@@ -25,3 +25,4 @@ Download the latest version from [releases](https://github.com/KoshikKumar17/wav
 
 - I will not recommended this app to listen songs as you may not get the best experience out of it. Just use it as a song downloader.
 - For playing music, use [dmt](https://github.com/imjyotiraditya/dmt) or [Gramophone](https://github.com/FoedusProgramme/Gramophone).
+- If you encounter any issues, open an issue in GitHub or drop a message at [telegram](https://telegram.me/WaveboxApp).
