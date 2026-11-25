@@ -4,9 +4,11 @@ package com.wavebox.app
 
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Favorite
@@ -68,6 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 
@@ -82,6 +86,10 @@ fun shareSong(ctx: Context, s: Song) {
     }
     ctx.startActivity(Intent.createChooser(i, "Share song"))
 }
+
+/** Thin outline so list cards stand out from the page background. */
+@Composable
+fun cardBorder(): BorderStroke = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f))
 
 @Composable
 fun glass(alpha: Float = 0.62f): Color = MaterialTheme.colorScheme.surface.copy(alpha = alpha)
@@ -122,6 +130,54 @@ fun MenuRow(text: String, icon: ImageVector, onClick: () -> Unit) {
     DropdownMenuItem(text = { Text(text) }, leadingIcon = { Icon(icon, null) }, onClick = onClick)
 }
 
+private val YtRed = Color(0xFFE62117)
+private val SaavnGreen = Color(0xFF1E9E55)
+
+/** Small corner tag: "YT Music" (red) or "JioSaavn" (green). Nothing for on-device songs. */
+@Composable
+fun SourceBadge(source: String, modifier: Modifier = Modifier) {
+    val (label, bg) = when (source) {
+        SRC_YT -> "YT Music" to YtRed
+        SRC_SAAVN -> "JioSaavn" to SaavnGreen
+        else -> return
+    }
+    Box(
+        modifier
+            .background(bg, RoundedCornerShape(topStart = 0.dp, topEnd = 0.dp, bottomEnd = 0.dp, bottomStart = 10.dp))
+            .padding(start = 5.dp, end = 7.dp, top = 1.dp, bottom = 1.dp)
+    ) {
+        Text(label, color = Color.White, fontSize = 8.sp, lineHeight = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+/**
+ * Puts the source tag in the top-right corner of a card, clipped to the card's inner rounded edge
+ * (card radius 18dp minus the 1dp border) so it never pokes out past the border.
+ */
+@Composable
+fun BoxScope.CornerBadge(source: String) {
+    Box(
+        Modifier.matchParentSize().padding(1.dp).clip(RoundedCornerShape(17.dp)),
+        contentAlignment = Alignment.TopEnd
+    ) { SourceBadge(source) }
+}
+
+/** Same footprint as the download icon: a cross inside a ring that fills as the download progresses. */
+@Composable
+fun DownloadingIcon(progress: Int) {
+    Box(contentAlignment = Alignment.Center) {
+        if (progress >= 100) {
+            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.5.dp)
+        } else {
+            CircularProgressIndicator(
+                progress = { maxOf(progress, 4) / 100f }, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp,
+                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f)
+            )
+        }
+        Icon(Icons.Default.Close, "Cancel download", Modifier.size(12.dp))
+    }
+}
+
 @Composable
 fun SongRow(
     vm: AppViewModel,
@@ -137,14 +193,17 @@ fun SongRow(
     var menu by remember { mutableStateOf(false) }
     val fav = vm.isFav(song.id)
 
+    Box(modifier.fillMaxWidth()) {
     Card(
         onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
+        border = cardBorder(),
         colors = CardDefaults.cardColors(
-            containerColor = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f) else glass()
+            containerColor = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f) else glass(0.85f)
         )
     ) {
+        Box {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Cover(song.thumb, Modifier.size(52.dp), 12.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -161,11 +220,10 @@ fun SongRow(
             if (active && vm.isPlaying) {
                 Icon(Icons.Default.GraphicEq, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
             }
-            if (song.links.isNotEmpty()) {
+            if (song.remote) {
                 when {
                     p != null -> IconButton(onClick = { vm.cancelDownload(song.id) }, modifier = Modifier.size(40.dp)) {
-                        if (p >= 100) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        else CircularProgressIndicator(progress = { p / 100f }, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        DownloadingIcon(p)
                     }
                     vm.isDownloaded(song.id) -> Icon(
                         Icons.Default.DownloadDone, "Downloaded",
@@ -191,18 +249,23 @@ fun SongRow(
                 }
             }
         }
+        CornerBadge(song.source)
+        }
+    }
     }
 }
 
 @Composable
-fun MiniPlayer(vm: AppViewModel, onOpen: () -> Unit) {
+fun MiniPlayer(vm: AppViewModel, onOpen: () -> Unit, modifier: Modifier = Modifier) {
     val s = vm.nowSong ?: return
     val prog by rememberProgress(vm)
     val (pos, dur) = prog
     val frac = if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f
     Card(
         onClick = onOpen,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = glass(0.88f))
     ) {

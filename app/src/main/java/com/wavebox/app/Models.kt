@@ -3,6 +3,11 @@ package com.wavebox.app
 import org.json.JSONObject
 import kotlin.math.abs
 
+const val SRC_ALL = "all"
+const val SRC_SAAVN = "saavn"
+const val SRC_YT = "yt"
+const val SRC_LOCAL = "local"
+
 data class Song(
     val id: String,
     val title: String,
@@ -16,8 +21,15 @@ data class Song(
     val thumb: String,
     val links: Map<Int, String>,
     val uri: String? = null,   // playable file uri (downloaded / on-device songs)
-    val added: Long = 0L
+    val added: Long = 0L,
+    val source: String = SRC_SAAVN   // saavn | yt | local
 ) {
+    val isYt: Boolean get() = source == SRC_YT
+    /** YouTube video id (YT songs are stored as "yt_<videoId>"; stream links are resolved lazily). */
+    val ytVideoId: String get() = id.removePrefix("yt_")
+    /** true when the song can be downloaded (i.e. it isn't just a file already on the device) */
+    val remote: Boolean get() = links.isNotEmpty() || isYt
+
     val qualities: List<Int>
         get() = links.keys.filter { it >= 96 }.sorted().ifEmpty { links.keys.sorted() }
 
@@ -28,7 +40,7 @@ data class Song(
         put("id", id); put("title", title); put("artist", artist); put("album", album)
         put("year", year); put("copyright", copyright); put("duration", duration)
         put("url", url); put("cover", cover); put("thumb", thumb)
-        put("uri", uri ?: ""); put("added", added)
+        put("uri", uri ?: ""); put("added", added); put("source", source)
         val l = JSONObject()
         links.forEach { (k, v) -> l.put(k.toString(), v) }
         put("links", l)
@@ -51,7 +63,8 @@ data class Song(
                 album = o.optString("album"), year = o.optString("year"),
                 copyright = o.optString("copyright"), duration = o.optInt("duration"),
                 url = o.optString("url"), cover = o.optString("cover"), thumb = o.optString("thumb"),
-                links = m, uri = o.optString("uri").ifBlank { null }, added = o.optLong("added")
+                links = m, uri = o.optString("uri").ifBlank { null }, added = o.optLong("added"),
+                source = o.optString("source").ifBlank { SRC_SAAVN }
             )
         }
     }
@@ -66,7 +79,8 @@ data class MediaCollection(
     val image: String,
     val thumb: String,
     val url: String,
-    val count: Int
+    val count: Int,
+    val source: String = SRC_SAAVN
 )
 
 data class UserPlaylist(val id: String, val name: String, val songs: List<Song>)

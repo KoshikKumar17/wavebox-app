@@ -1,3 +1,13 @@
 -keep class com.wavebox.app.LameNative { *; }
 -dontwarn okhttp3.**
 -dontwarn okio.**
+-keep class org.mozilla.javascript.** { *; }
+-keep class org.mozilla.classfile.ClassFileWriter
+-dontwarn org.mozilla.javascript.tools.**
+-dontwarn org.mozilla.javascript.JavaToJSONConverters
+-dontwarn javax.script.**
+-dontwarn jdk.dynalink.**
+-dontwarn java.beans.**
+-keep class org.schabi.newpipe.extractor.timeago.patterns.** { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite { *; }
+-dontwarn com.google.protobuf.**

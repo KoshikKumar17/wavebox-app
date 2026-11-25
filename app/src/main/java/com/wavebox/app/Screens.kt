@@ -3,8 +3,17 @@
 package com.wavebox.app
 
 import android.Manifest
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,20 +72,29 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import java.util.Calendar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 
 // ======================= HOME =======================
 @Composable
@@ -197,12 +215,13 @@ fun SearchScreen(vm: AppViewModel) {
         contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        item { SourceTabs(vm.searchSource) { vm.setSource(it) } }
         item {
             OutlinedTextField(
                 value = vm.query, onValueChange = { vm.onQuery(it) },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
                 shape = RoundedCornerShape(28.dp),
-                placeholder = { Text("Search or paste a JioSaavn link") },
+                placeholder = { Text("Search or paste a YouTube / JioSaavn link") },
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 trailingIcon = {
                     if (vm.query.isNotEmpty()) IconButton(onClick = { vm.onQuery("") }) { Icon(Icons.Default.Close, "Clear") }
@@ -223,7 +242,7 @@ fun SearchScreen(vm: AppViewModel) {
                 SongRow(vm, s, onClick = { vm.play(vm.songResults, i) })
             }
         } else {
-            items(vm.collResults, key = { it.kind + it.id }) { c -> CollectionRow(c) { vm.openCollection(c) } }
+            items(vm.collResults, key = { it.source + it.kind + it.id }) { c -> CollectionRow(c) { vm.openCollection(c) } }
         }
         if (vm.searching) item {
             Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -244,17 +263,55 @@ fun SearchScreen(vm: AppViewModel) {
     }
 }
 
+/** Rounded tabs above the search bar: All / YT Music / JioSaavn. */
+@Composable
+private fun SourceTabs(selected: String, onSelect: (String) -> Unit) {
+    val items = listOf(SRC_ALL to "All", SRC_YT to "YT Music", SRC_SAAVN to "JioSaavn")
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        items.forEach { (key, label) ->
+            val on = key == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .clickable { onSelect(key) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    label, fontWeight = FontWeight.SemiBold,
+                    color = if (on) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun CollectionRow(c: MediaCollection, onClick: () -> Unit) {
-    Card(
-        onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = glass())
-    ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Cover(c.thumb.ifBlank { c.image }, Modifier.size(64.dp), 14.dp)
-            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(c.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                Text(c.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Box(Modifier.fillMaxWidth()) {
+        Card(
+            onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+            border = cardBorder(),
+            colors = CardDefaults.cardColors(containerColor = glass(0.85f))
+        ) {
+            Box {
+                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Cover(c.thumb.ifBlank { c.image }, Modifier.size(64.dp), 14.dp)
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        Text(c.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                        Text(c.subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                CornerBadge(c.source)
             }
         }
     }
@@ -488,6 +545,10 @@ fun DetailScreen(vm: AppViewModel, d: DetailState) {
                     sort = sort, allowRecent = false, onSort = { sort = it },
                     extras = {
                         IconButton(onClick = { vm.downloadAll(sorted) }) { Icon(Icons.Default.Download, "Download all") }
+                        val prog by vm.dlProgress.collectAsState()
+                        if (sorted.any { prog.containsKey(it.id) }) {
+                            IconButton(onClick = { vm.cancelDownloads(sorted) }) { Icon(Icons.Default.Close, "Cancel all downloads") }
+                        }
                         IconButton(onClick = { vm.pickFor = sorted }) { Icon(Icons.Default.PlaylistAdd, "Add all to playlist") }
                     }
                 )
@@ -511,6 +572,7 @@ fun SettingsScreen(vm: AppViewModel) {
         if (uri != null) vm.setFolder(uri)
     }
     val quals = listOf(96, 160, 320)
+    val ytQuals = listOf(64, 128, 160)
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp, 20.dp, 16.dp, 24.dp),
@@ -519,17 +581,23 @@ fun SettingsScreen(vm: AppViewModel) {
         item { Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
 
         item {
-            SettingsCard("Playback quality", "Streaming quality (kbps). Applies to songs you start next.") {
+            SettingsCard("Playback quality", "Streaming quality (kbps). Applies to songs you start next. YT Music uses the closest stream YouTube offers.") {
+                Text("JioSaavn", fontWeight = FontWeight.SemiBold, color = Color(0xFF1E9E55))
                 Segmented(quals.map { "$it" }, quals.indexOf(vm.playQuality).coerceAtLeast(0)) { vm.updatePlayQuality(quals[it]) }
+                Text("YT Music", fontWeight = FontWeight.SemiBold, color = Color(0xFFE62117))
+                Segmented(ytQuals.map { "$it" }, ytQuals.indexOf(vm.ytPlayQuality).coerceAtLeast(0)) { vm.updateYtPlayQuality(ytQuals[it]) }
             }
         }
         item {
-            SettingsCard("Download quality", "Bitrate of saved files (kbps).") {
+            SettingsCard("Download quality", "Bitrate of saved files (kbps). For YT Music, M4A downloads top out at 128 kbps; MP3 can use the 160 kbps Opus stream.") {
+                Text("JioSaavn", fontWeight = FontWeight.SemiBold, color = Color(0xFF1E9E55))
                 Segmented(quals.map { "$it" }, quals.indexOf(vm.dlQuality).coerceAtLeast(0)) { vm.updateDlQuality(quals[it]) }
+                Text("YT Music", fontWeight = FontWeight.SemiBold, color = Color(0xFFE62117))
+                Segmented(ytQuals.map { "$it" }, ytQuals.indexOf(vm.ytDlQuality).coerceAtLeast(0)) { vm.updateYtDlQuality(ytQuals[it]) }
             }
         }
         item {
-            SettingsCard("Download format", "M4A keeps the original audio. MP3 is converted on your phone (takes a few seconds per song).") {
+            SettingsCard("Download format", "Same for YT Music and JioSaavn. M4A keeps the original audio. MP3 is converted on your phone (takes a few seconds per song).") {
                 val fmts = listOf("m4a", "mp3")
                 Segmented(listOf("M4A", "MP3"), fmts.indexOf(vm.dlFormat).coerceAtLeast(0)) { vm.updateDlFormat(fmts[it]) }
             }
@@ -555,8 +623,9 @@ fun SettingsScreen(vm: AppViewModel) {
             }
         }
         item {
-            SettingsCard("Appearance", "Soft colours that drift slowly and change with the song.") {
+            SettingsCard("Appearance", "Soft colours that drift slowly. Auto changes with the song; or pick one gradient.") {
                 Segmented(listOf("System", "Light", "Dark"), vm.themeMode.coerceIn(0, 2)) { vm.updateThemeMode(it) }
+                GradientPicker(vm.gradientStyle) { vm.updateGradient(it) }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Animated gradient", modifier = Modifier.weight(1f))
                     Switch(checked = vm.animateBg, onCheckedChange = { vm.updateAnimateBg(it) })
@@ -569,7 +638,122 @@ fun SettingsScreen(vm: AppViewModel) {
             }
         }
         item {
-            SettingsCard("Coming soon", "Synced lyrics from LRCLIB.") {}
+            val uri = LocalUriHandler.current
+            SettingsCard("Lyrics", "Get synced lyrics (.lrc) and embed them into your downloaded songs with the LRC Embedder app.") {
+                FilledTonalButton(onClick = { uri.openUri("https://lrc-embedder.pages.dev") }) {
+                    Icon(Icons.Default.Download, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Download LRC Embedder")
+                }
+            }
+        }
+        item {
+            val uri = LocalUriHandler.current
+            val ctx = LocalContext.current
+            val scope = rememberCoroutineScope()
+            var checking by remember { mutableStateOf(false) }
+            val current = remember {
+                runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "1.0"
+            }
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Current version", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(current, fontWeight = FontWeight.SemiBold)
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Made by", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Koshik Kumar ↗",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.clickable { uri.openUri("https://koshik.pages.dev") }
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().clickable(enabled = !checking) {
+                        checking = true
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val req = Request.Builder()
+                                        .url("https://api.github.com/repos/KoshikKumar17/wavebox-app/releases/latest")
+                                        .build()
+                                    OkHttpClient().newCall(req).execute().use { r ->
+                                        val j = JSONObject(r.body!!.string())
+                                        j.getString("tag_name").removePrefix("v") to j.getString("html_url")
+                                    }
+                                }.getOrNull()
+                            }
+                            checking = false
+                            when {
+                                result == null ->
+                                    Toast.makeText(ctx, "Couldn't check for updates", Toast.LENGTH_SHORT).show()
+                                isNewer(result.first, current) -> {
+                                    Toast.makeText(ctx, "Update ${result.first} available", Toast.LENGTH_SHORT).show()
+                                    uri.openUri(result.second)
+                                }
+                                else ->
+                                    Toast.makeText(ctx, "You're up to date", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Check for updates", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (checking) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("›", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GradientPicker(selected: Int, onSelect: (Int) -> Unit) {
+    val names = listOf("Auto") + GradientStyles.map { it.name }
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        items(names.size) { i ->
+            val on = i == selected
+            Column(
+                Modifier.clickable { onSelect(i) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(gradientPreview(i)))
+                        .border(
+                            if (on) 3.dp else 1.dp,
+                            if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                            CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (on) Icon(Icons.Default.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
+                }
+                Text(
+                    names[i], style = MaterialTheme.typography.labelSmall,
+                    color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal
+                )
+            }
         }
     }
 }
@@ -595,4 +779,15 @@ private fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> U
             ) { Text(label) }
         }
     }
+}
+
+private fun isNewer(latest: String, current: String): Boolean {
+    val a = latest.split(".").map { it.toIntOrNull() ?: 0 }
+    val b = current.split(".").map { it.toIntOrNull() ?: 0 }
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val x = a.getOrElse(i) { 0 }
+        val y = b.getOrElse(i) { 0 }
+        if (x != y) return x > y
+    }
+    return false
 }

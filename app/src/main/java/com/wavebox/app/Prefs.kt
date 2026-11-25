@@ -13,6 +13,15 @@ class Prefs(ctx: Context) {
         get() = sp.getInt("dq", 320)
         set(v) = sp.edit().putInt("dq", v).apply()
 
+    /** YT Music quality targets in kbps (closest available stream is used) */
+    var ytPlayQuality: Int
+        get() = sp.getInt("ypq", 128)
+        set(v) = sp.edit().putInt("ypq", v).apply()
+
+    var ytDlQuality: Int
+        get() = sp.getInt("ydq", 128)
+        set(v) = sp.edit().putInt("ydq", v).apply()
+
     /** null = default (Music/Wavebox on internal storage) */
     var folder: String?
         get() = sp.getString("folder", null)
@@ -25,6 +34,11 @@ class Prefs(ctx: Context) {
     var animateBg: Boolean
         get() = sp.getBoolean("animbg", true)
         set(v) = sp.edit().putBoolean("animbg", v).apply()
+
+    /** 0 = Auto (follows the song), 1.. = fixed gradient from GradientStyles */
+    var gradient: Int
+        get() = sp.getInt("grad", 0)
+        set(v) = sp.edit().putInt("grad", v).apply()
 
     /** 0 = follow system, 1 = light, 2 = dark */
     var themeMode: Int

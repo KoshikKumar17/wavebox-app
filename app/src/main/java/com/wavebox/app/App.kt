@@ -3,9 +3,22 @@
 package com.wavebox.app
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -52,18 +65,56 @@ fun WaveboxApp(vm: AppViewModel) {
     LaunchedEffect(Unit) { vm.messages.collect { snack.showSnackbar(it) } }
     var showFull by rememberSaveable { mutableStateOf(false) }
 
-    BackHandler(enabled = showFull) { showFull = false }
+    // 0 = player collapsed to the bottom bar, 1 = full player. One value drives the whole motion,
+    // so the player follows the finger and a flick keeps its speed (like YouTube Music).
+    var expand by remember { mutableFloatStateOf(if (showFull) 1f else 0f) }
+    var barPx by remember { mutableFloatStateOf(0f) }
+    var settle by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    val playerVisible by remember { derivedStateOf { expand > 0.001f } }
+
+    BackHandler(enabled = showFull) { settle?.cancel(); showFull = false; settle = scope.launch { animate(expand, 0f, 0f, spring(Spring.DampingRatioNoBouncy, 380f)) { v, _ -> expand = v.coerceIn(0f, 1f) } } }
     BackHandler(enabled = !showFull && vm.detail != null) { vm.closeDetail() }
     BackHandler(enabled = !showFull && vm.detail == null && vm.tab != 0) { vm.tab = 0 }
 
-    Box(Modifier.fillMaxSize()) {
-        GradientBackground(seed = vm.nowId ?: "home", animate = vm.animateBg) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val heightPx = constraints.maxHeight.toFloat()
+        val travel = (heightPx - barPx).coerceAtLeast(1f)
+
+        fun settleTo(target: Float, velocity: Float = 0f) {
+            settle?.cancel()
+            showFull = target > 0.5f
+            settle = scope.launch {
+                animate(expand, target, velocity, spring(Spring.DampingRatioNoBouncy, 380f)) { v, _ ->
+                    expand = v.coerceIn(0f, 1f)
+                }
+            }
+        }
+
+        val dragState = rememberDraggableState { dy ->
+            settle?.cancel()
+            expand = (expand - dy / travel).coerceIn(0f, 1f)
+        }
+        val dragMod = Modifier.draggable(
+            state = dragState, orientation = Orientation.Vertical,
+            onDragStopped = { v ->
+                val target = when {
+                    v < -700f -> 1f
+                    v > 700f -> 0f
+                    expand > 0.5f -> 1f
+                    else -> 0f
+                }
+                settleTo(target, -v / travel)
+            }
+        )
+
+        GradientBackground(seed = vm.nowId ?: "home", animate = vm.animateBg, style = vm.gradientStyle) {
             Scaffold(
                 containerColor = Color.Transparent,
                 snackbarHost = { SnackbarHost(snack) },
                 bottomBar = {
-                    Column {
-                        if (vm.nowSong != null) MiniPlayer(vm) { showFull = true }
+                    Column(Modifier.onSizeChanged { barPx = it.height.toFloat() }) {
+                        if (vm.nowSong != null) MiniPlayer(vm, onOpen = { settleTo(1f) }, modifier = dragMod)
                         NavigationBar(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)) {
                             tabs.forEachIndexed { i, t ->
                                 NavigationBarItem(
@@ -94,12 +145,22 @@ fun WaveboxApp(vm: AppViewModel) {
             }
         }
 
-        AnimatedVisibility(
-            visible = showFull,
-            enter = slideInVertically { it },
-            exit = slideOutVertically { it }
-        ) {
-            PlayerScreen(vm, onClose = { showFull = false })
+        if (playerVisible) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        // top edge starts at the bottom bar and follows the finger up to the screen top
+                        translationY = (1f - expand) * travel
+                        alpha = minOf(1f, expand * 3f)
+                        val r = (28f * (1f - expand)).dp
+                        shape = RoundedCornerShape(topStart = r, topEnd = r)
+                        clip = true
+                    }
+                    .then(dragMod)
+            ) {
+                PlayerScreen(vm, onClose = { settleTo(0f) })
+            }
         }
 
         vm.pickFor?.let { songs -> PlaylistPickerDialog(vm, songs) { vm.pickFor = null } }

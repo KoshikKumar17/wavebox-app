@@ -41,7 +41,9 @@ class DownloadService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val n = Notification.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_stat_download)
+            .setColor(0xFF6C5CD6.toInt())
+            .setColorized(false)
             .setContentTitle("Wavebox")
             .setContentText(if (count <= 1) "Downloading a song…" else "Downloading $count songs…")
             .setOngoing(true)

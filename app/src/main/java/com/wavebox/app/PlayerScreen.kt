@@ -74,7 +74,7 @@ fun PlayerScreen(vm: AppViewModel, onClose: () -> Unit) {
     // The empty-tap handler stops taps on blank areas (like the cover) from falling through
     // to the song list underneath the player.
     GradientBackground(
-        seed = vm.nowId ?: "home", animate = vm.animateBg,
+        seed = vm.nowId ?: "home", animate = vm.animateBg, style = vm.gradientStyle,
         modifier = Modifier.pointerInput(Unit) { detectTapGestures { } }
     ) {
         if (s == null) {
@@ -182,12 +182,9 @@ fun PlayerScreen(vm: AppViewModel, onClose: () -> Unit) {
                 Modifier.fillMaxWidth().padding(bottom = 12.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
             ) {
-                if (s.links.isNotEmpty()) {
+                if (s.remote) {
                     when {
-                        dl != null -> IconButton(onClick = { vm.cancelDownload(s.id) }) {
-                            if (dl >= 100) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                            else CircularProgressIndicator(progress = { dl / 100f }, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-                        }
+                        dl != null -> IconButton(onClick = { vm.cancelDownload(s.id) }) { DownloadingIcon(dl) }
                         vm.isDownloaded(s.id) -> Icon(Icons.Default.DownloadDone, "Downloaded", tint = MaterialTheme.colorScheme.primary)
                         else -> IconButton(onClick = { vm.download(s) }) { Icon(Icons.Default.Download, "Download") }
                     }

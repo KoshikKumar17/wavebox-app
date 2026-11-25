@@ -27,11 +27,14 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import org.schabi.newpipe.extractor.Page
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,7 +54,8 @@ data class DetailState(
     val url: String,
     val songs: List<Song> = emptyList(),
     val loading: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val source: String = SRC_SAAVN
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -71,6 +75,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dlQuality by mutableIntStateOf(prefs.dlQuality)
         private set
+    var ytPlayQuality by mutableIntStateOf(prefs.ytPlayQuality)
+        private set
+    var ytDlQuality by mutableIntStateOf(prefs.ytDlQuality)
+        private set
     var folder by mutableStateOf(prefs.folder)
         private set
     var embed by mutableStateOf(prefs.embed)
@@ -79,14 +87,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var themeMode by mutableIntStateOf(prefs.themeMode)
         private set
+    var gradientStyle by mutableIntStateOf(prefs.gradient)
+        private set
     var dlFormat by mutableStateOf(prefs.dlFormat)
         private set
 
     fun updatePlayQuality(q: Int) { playQuality = q; prefs.playQuality = q }
     fun updateDlQuality(q: Int) { dlQuality = q; prefs.dlQuality = q }
+    fun updateYtPlayQuality(q: Int) { ytPlayQuality = q; prefs.ytPlayQuality = q }
+    fun updateYtDlQuality(q: Int) { ytDlQuality = q; prefs.ytDlQuality = q }
     fun updateEmbed(v: Boolean) { embed = v; prefs.embed = v }
     fun updateAnimateBg(v: Boolean) { animateBg = v; prefs.animateBg = v }
     fun updateThemeMode(m: Int) { themeMode = m; prefs.themeMode = m }
+    fun updateGradient(g: Int) { gradientStyle = g; prefs.gradient = g }
     fun updateDlFormat(f: String) { dlFormat = f; prefs.dlFormat = f }
 
     fun setFolder(uri: Uri) {
@@ -183,6 +196,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var query by mutableStateOf("")
     var searchType by mutableStateOf("songs")
         private set
+    /** all | yt | saavn */
+    var searchSource by mutableStateOf(SRC_ALL)
+        private set
     var songResults by mutableStateOf<List<Song>>(emptyList())
         private set
     var collResults by mutableStateOf<List<MediaCollection>>(emptyList())
@@ -193,41 +209,120 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var canLoadMore by mutableStateOf(false)
         private set
-    private var page = 1
+    private var saavnPage = 1
+    private var saavnMore = false
+    private var ytNext: Page? = null
+    private var ytMore = false
     private var rid = 0
     private var activeQuery = ""
     private var activeType = "songs"
+    private var activeSource = SRC_ALL
     private var debounceJob: Job? = null
 
     fun setType(t: String) { searchType = t; searchError = null; canLoadMore = false }
+
+    fun setSource(s: String) {
+        if (s == searchSource) return
+        searchSource = s
+        searchError = null
+        if (query.trim().length >= 2) search()
+    }
+
+    private fun linkOf(t: String): String? = Api.extractLink(t) ?: YtSource.extractLink(t)
 
     fun onQuery(q: String) {
         query = q
         debounceJob?.cancel()
         val t = q.trim()
-        if (t.length >= 2 && (searchType == "songs" || Api.extractLink(t) != null)) {
+        if (t.length >= 2 && (searchType == "songs" || linkOf(t) != null)) {
             debounceJob = viewModelScope.launch { delay(650); search() }
         }
+    }
+
+    private class Part(
+        val songs: List<Song> = emptyList(), val colls: List<MediaCollection> = emptyList(),
+        val more: Boolean = false, val next: Page? = null
+    )
+
+    private class Batch(val songs: List<Song>, val colls: List<MediaCollection>)
+
+    private fun <T> interleave(a: List<T>, b: List<T>): List<T> {
+        val out = ArrayList<T>(a.size + b.size)
+        for (i in 0 until maxOf(a.size, b.size)) {
+            if (i < a.size) out.add(a[i])
+            if (i < b.size) out.add(b[i])
+        }
+        return out
+    }
+
+    /** Fetches one page from every selected source in parallel and merges them (YT Music first). */
+    private suspend fun fetchBatch(q: String, type: String, src: String, first: Boolean): Batch = coroutineScope {
+        val useY = src != SRC_SAAVN && (first || ytMore)
+        val useS = src != SRC_YT && (first || saavnMore)
+        val kind = if (type == "albums") "album" else "playlist"
+        val sPage = saavnPage
+        val yPage = ytNext
+
+        val yj = if (!useY) null else async {
+            runCatching {
+                if (type == "songs") YtSource.searchSongs(q, yPage).let { Part(songs = it.songs, next = it.next) }
+                else YtSource.searchCollections(kind, q, yPage).let { Part(colls = it.items, next = it.next) }
+            }
+        }
+        val sj = if (!useS) null else async {
+            runCatching {
+                if (type == "songs") Api.searchSongs(q, sPage).let { Part(songs = it.songs, more = it.rawCount >= SONG_LIMIT) }
+                else Api.searchCollections(kind, q, sPage).let { Part(colls = it.items, more = it.rawCount >= COLL_LIMIT) }
+            }
+        }
+        val yr = yj?.await()
+        val sr = sj?.await()
+
+        val ran = listOfNotNull(yr, sr)
+        if (ran.isNotEmpty() && ran.all { it.isFailure }) throw ran.first().exceptionOrNull() ?: IllegalStateException("Search failed")
+        if (first) {
+            if (yr?.isFailure == true) say("YT Music couldn't be reached")
+            if (sr?.isFailure == true) say("JioSaavn couldn't be reached")
+        }
+        if (yj != null) {
+            val p = yr?.getOrNull()
+            ytNext = p?.next
+            ytMore = p?.next != null
+        }
+        if (sj != null) {
+            val p = sr?.getOrNull()
+            saavnMore = p?.more == true
+            if (p != null) saavnPage++
+        }
+        val y = yr?.getOrNull()
+        val s = sr?.getOrNull()
+        Batch(
+            interleave(y?.songs.orEmpty(), s?.songs.orEmpty()),
+            interleave(y?.colls.orEmpty(), s?.colls.orEmpty())
+        )
     }
 
     fun search() {
         val q = query.trim()
         if (q.isEmpty()) return
         debounceJob?.cancel()
-        val link = Api.extractLink(q)
+        val link = linkOf(q)
         val my = ++rid
         searching = true
         searchError = null
         songResults = emptyList()
         collResults = emptyList()
         canLoadMore = false
-        page = 1
+        saavnPage = 1; saavnMore = false
+        ytNext = null; ytMore = false
         activeQuery = q
         activeType = searchType
+        activeSource = searchSource
         viewModelScope.launch {
             try {
                 if (link != null) {
-                    when (val r = Api.resolveLink(link)) {
+                    val r = if (Api.extractLink(q) != null) Api.resolveLink(link) else YtSource.resolveLink(link)
+                    when (r) {
                         is LinkResult.Songs -> if (my == rid) {
                             searchType = "songs"
                             songResults = r.songs
@@ -235,22 +330,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         is LinkResult.Detail -> if (my == rid) showDetail(r.info, r.songs)
                     }
-                } else if (activeType == "songs") {
-                    val r = Api.searchSongs(q, 1)
-                    if (my == rid) {
-                        songResults = r.songs
-                        canLoadMore = r.rawCount >= SONG_LIMIT
-                        page = 2
-                        if (r.songs.isEmpty()) searchError = "No songs found"
-                    }
                 } else {
-                    val kind = if (activeType == "albums") "album" else "playlist"
-                    val r = Api.searchCollections(kind, q, 1)
+                    val b = fetchBatch(q, activeType, activeSource, first = true)
                     if (my == rid) {
-                        collResults = r.items
-                        canLoadMore = r.rawCount >= COLL_LIMIT
-                        page = 2
-                        if (r.items.isEmpty()) searchError = "Nothing found"
+                        songResults = b.songs
+                        collResults = b.colls
+                        canLoadMore = saavnMore || ytMore
+                        if (activeType == "songs" && b.songs.isEmpty()) searchError = "No songs found"
+                        if (activeType != "songs" && b.colls.isEmpty()) searchError = "Nothing found"
                     }
                 }
             } catch (e: CancellationException) {
@@ -269,25 +356,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         searching = true
         viewModelScope.launch {
             try {
-                if (activeType == "songs") {
-                    val r = Api.searchSongs(activeQuery, page)
-                    if (my == rid) {
+                val b = fetchBatch(activeQuery, activeType, activeSource, first = false)
+                if (my == rid) {
+                    if (activeType == "songs") {
                         val seen = songResults.map { it.id }.toSet()
-                        val fresh = r.songs.filter { it.id !in seen }
-                        songResults = songResults + fresh
-                        canLoadMore = r.rawCount >= SONG_LIMIT && fresh.isNotEmpty()
-                        page++
+                        songResults = songResults + b.songs.filter { it.id !in seen }
+                    } else {
+                        val seen = collResults.map { it.source + it.id }.toSet()
+                        collResults = collResults + b.colls.filter { (it.source + it.id) !in seen }
                     }
-                } else {
-                    val kind = if (activeType == "albums") "album" else "playlist"
-                    val r = Api.searchCollections(kind, activeQuery, page)
-                    if (my == rid) {
-                        val seen = collResults.map { it.id }.toSet()
-                        val fresh = r.items.filter { it.id !in seen }
-                        collResults = collResults + fresh
-                        canLoadMore = r.rawCount >= COLL_LIMIT && fresh.isNotEmpty()
-                        page++
-                    }
+                    canLoadMore = saavnMore || ytMore
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -305,7 +383,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             Intent.ACTION_SEND -> i?.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
         } ?: return
-        val link = Api.extractLink(text) ?: return
+        val link = linkOf(text) ?: return
         tab = 1
         query = link
         search()
@@ -318,15 +396,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun showDetail(info: MediaCollection, songs: List<Song>) {
         detailRid++
-        detail = DetailState(info.kind, info.id, info.title, info.subtitle, info.image, info.url, songs)
+        detail = DetailState(info.kind, info.id, info.title, info.subtitle, info.image, info.url, songs, source = info.source)
     }
 
     fun openCollection(c: MediaCollection) {
         val my = ++detailRid
-        detail = DetailState(c.kind, c.id, c.title, c.subtitle, c.image, c.url, loading = true)
+        detail = DetailState(c.kind, c.id, c.title, c.subtitle, c.image, c.url, loading = true, source = c.source)
         viewModelScope.launch {
             try {
-                val r = Api.detail(c.kind, c.id)
+                val r = if (c.source == SRC_YT) YtSource.detail(c) else Api.detail(c.kind, c.id)
                 if (my == detailRid) {
                     detail = detail?.copy(
                         title = r.info.title.ifBlank { c.title },
@@ -344,7 +422,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun retryDetail() {
-        detail?.let { d -> openCollection(MediaCollection(d.kind, d.id, d.title, d.subtitle, d.image, d.image, d.url, 0)) }
+        detail?.let { d -> openCollection(MediaCollection(d.kind, d.id, d.title, d.subtitle, d.image, d.image, d.url, 0, d.source)) }
     }
 
     fun openUserPlaylist(p: UserPlaylist) { detailRid++; detail = DetailState("user", p.id, p.name, "", "", "") }
@@ -386,7 +464,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun item(s: Song): MediaItem {
         songMap[s.id] = s
-        val uri = s.uri ?: s.urlFor(playQuality)
+        val uri = s.uri ?: if (s.isYt) "ytm://${s.ytVideoId}" else s.urlFor(playQuality)
         val meta = MediaMetadata.Builder()
             .setTitle(s.title).setArtist(s.artist).setAlbumTitle(s.album)
             .setArtworkUri(if (s.cover.isNotBlank()) Uri.parse(s.cover) else null)
@@ -471,11 +549,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var errorSkips = 0
+    private var ytRetryId: String? = null
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(playing: Boolean) {
             isPlaying = playing
-            if (playing) errorSkips = 0
+            if (playing) { errorSkips = 0; ytRetryId = null }
         }
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             nowId = mediaItem?.mediaId
@@ -489,6 +568,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         override fun onRepeatModeChanged(mode: Int) { repeatMode = mode }
         override fun onPlayerError(error: PlaybackException) {
             val c = controller
+            val curId = c?.currentMediaItem?.mediaId
+            val cur = curId?.let { songMap[it] }
+            if (c != null && cur != null && cur.isYt && cur.uri == null && ytRetryId != cur.id) {
+                // the stream link may have expired: forget it and try again once with a fresh one
+                ytRetryId = cur.id
+                YtSource.forget(cur.ytVideoId)
+                c.prepare(); c.play()
+                return
+            }
             if (c != null && c.hasNextMediaItem() && errorSkips < 3) {
                 errorSkips++
                 say("Couldn't play this song. Skipping to the next one.")
@@ -506,6 +594,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val dlScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         val dlState = MutableStateFlow<Map<String, Int>>(emptyMap())
         val jobs = HashMap<String, Job>()
+        /** ids cancelled in bulk: no per-song "Download cancelled" message */
+        val quiet = HashSet<String>()
         val gate = Semaphore(2)
         @Volatile var live: AppViewModel? = null
 
@@ -523,10 +613,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun folderUri(): Uri? = folder?.let { Uri.parse(it) }
 
     fun download(s: Song) {
-        if (s.links.isEmpty()) { say("This song is already on your device"); return }
+        if (!s.remote) { say("This song is already on your device"); return }
         if (isDownloaded(s.id)) { say("Already downloaded"); return }
         if (jobs.containsKey(s.id)) return
-        val quality = dlQuality
+        val quality = if (s.isYt) ytDlQuality else dlQuality
         val format = dlFormat
         val target = folderUri()
         val withTags = embed
@@ -543,7 +633,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     live?.say("Saved: ${r.name}")
                 }
             } catch (e: CancellationException) {
-                live?.say("Download cancelled")
+                if (!quiet.remove(s.id)) live?.say("Download cancelled")
                 throw e
             } catch (e: Exception) {
                 live?.say(e.message ?: "Download failed")
@@ -559,13 +649,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun downloadAll(list: List<Song>) {
-        val todo = list.filter { !isDownloaded(it.id) && it.links.isNotEmpty() }
+        val todo = list.filter { !isDownloaded(it.id) && it.remote }
         if (todo.isEmpty()) { say("Everything is already downloaded"); return }
-        say("Downloading ${todo.size} songs")
+        val fresh = todo.count { !jobs.containsKey(it.id) }
+        if (fresh == 0) { say("Already downloading"); return }
+        say(if (fresh == 1) "Downloading 1 song" else "Downloading $fresh songs")
         todo.forEach { download(it) }
     }
 
     fun cancelDownload(id: String) { jobs[id]?.cancel() }
+
+    /** Cancels every running or waiting download among [list] (songs already saved stay saved). */
+    fun cancelDownloads(list: List<Song>) {
+        val ids = list.map { it.id }.toSet()
+        val hit = jobs.keys.filter { it in ids }
+        if (hit.isEmpty()) return
+        quiet.addAll(hit)
+        hit.forEach { jobs[it]?.cancel() }
+        say(if (hit.size == 1) "Cancelled 1 download" else "Cancelled ${hit.size} downloads")
+    }
 
     fun deleteDownloaded(s: Song) {
         downloaded = downloaded.filter { it.id != s.id }
@@ -574,7 +676,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val uri = Uri.parse(u)
-                if (uri.authority == "media") ctx.contentResolver.delete(uri, null, null)
+                if (uri.scheme == "file") java.io.File(uri.path ?: return@runCatching).delete()
+                else if (uri.authority == "media") ctx.contentResolver.delete(uri, null, null)
                 else DocumentFile.fromSingleUri(ctx, uri)?.delete()
             }
         }
@@ -635,7 +738,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         copyright = "", duration = (c.getLong(iDur) / 1000).toInt(),
                         url = "", cover = cover, thumb = cover, links = emptyMap(),
                         uri = ContentUris.withAppendedId(base, id).toString(),
-                        added = c.getLong(iAdded) * 1000
+                        added = c.getLong(iAdded) * 1000,
+                        source = SRC_LOCAL
                     )
                 )
             }
