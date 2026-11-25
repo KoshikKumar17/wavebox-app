@@ -2,7 +2,7 @@
 
 **For web ui:- [Click here](https://github.com/KoshikKumar17/wavebox-web)**
 
-A simple, lightweight and easy to use android app to play or download JioSaavn songs, albums and playlists based on API (`jiosaavnsearch-up.koshikkumar17.workers.dev`).
+A simple, lightweight and easy to use android app to play or download **JioSaavn/YT Music** songs, albums and playlists based on [JioSaavn API](https://github.com/KoshikKumar17/jiosaavnsearch-up) and [NewPipe Extractor](https://github.com/TeamNewPipe/NewPipeExtractor)
 
 ## Download
 
